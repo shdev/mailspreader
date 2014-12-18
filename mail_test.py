@@ -22,6 +22,8 @@ class MailSpreader(object):
     CONFIG_DEFAULT_MARK_AS_SEEN_AFTER_PROCESSING = True
     CONFIG_DEFAULT_SEARCH_FILTER = 'NEW'
 
+    CONFIG_FIELD_CUSTOM_HEADER = 'custom_header'
+    CONFIG_FIELD_CUSTOM_HEADER_VALUE = 'custom_header_value'
     CONFIG_FIELD_DELETE_AFTER_PROCESSING = 'delete_after_processing'
     CONFIG_FIELD_HOST = 'host'
     CONFIG_FIELD_LOGFIlE = 'logfile'
@@ -30,6 +32,7 @@ class MailSpreader(object):
         'mark_as_seen_after_processing'
     CONFIG_FIELD_PASSWORD = 'password'
     CONFIG_FIELD_PORT = 'port'
+    CONFIG_FIELD_RECIPIENT = 'recipient'
     CONFIG_FIELD_SEARCH_FILTER = 'search_filter'
     CONFIG_FIELD_USE_SSL = 'use_ssl'
     CONFIG_FIELD_USERNAME = 'username'
@@ -77,6 +80,12 @@ class MailSpreader(object):
 
         return smtp_server
 
+    @classmethod
+    def remove_headers(cls, headers):
+        for key in headers.keys():
+            if key.lower() not in MailSpreader.HEADER_EXCLUDES:
+                del headers[key]
+
     def main(self):
         self.preparations()
         self.process_data()
@@ -102,11 +111,42 @@ class MailSpreader(object):
     def process_config(self):
         self.cfg = configparser.ConfigParser(allow_no_value=True)
         self.cfg.read(self.args.configfile)
-        # print(self.cfg.sections())
-        # for section in self.cfg.sections():
-        #     print('%s\n---------' % section)
-        #     for option in self.cfg.options(section):
-        #         print("'%s':'%s'" % (option, self.cfg.get(section, option)))
+
+        self.search_filter = self.cfg.get(
+            MailSpreader.CONFIG_SECTION_INPUT_SERVER,
+            MailSpreader.CONFIG_FIELD_SEARCH_FILTER,
+            fallback=MailSpreader.CONFIG_DEFAULT_SEARCH_FILTER)
+
+        self.mark_as_seen = self.cfg.getboolean(
+            MailSpreader.CONFIG_SECTION_INPUT_SERVER,
+            MailSpreader.CONFIG_FIELD_MARK_AS_SEEN_AFTER_PROCESSING,
+            fallback=MailSpreader.CONFIG_DEFAULT_MARK_AS_SEEN_AFTER_PROCESSING)
+
+        self.delete_mail = self.cfg.getboolean(
+            MailSpreader.CONFIG_SECTION_INPUT_SERVER,
+            MailSpreader.CONFIG_FIELD_DELETE_AFTER_PROCESSING,
+            fallback=MailSpreader.CONFIG_DEFAULT_DELETE_AFTER_PROCESSING)
+
+        self.custom_header = self.cfg.get(
+            MailSpreader.CONFIG_SECTION_SEND_SERVER,
+            MailSpreader.CONFIG_FIELD_CUSTOM_HEADER,
+            fallback="")
+
+        self.custom_header_value = self.cfg.get(
+            MailSpreader.CONFIG_SECTION_SEND_SERVER,
+            MailSpreader.CONFIG_FIELD_CUSTOM_HEADER_VALUE,
+            fallback="")
+
+        self.recipient = self.cfg.get(MailSpreader.CONFIG_SECTION_SEND_SERVER,
+                                      MailSpreader.CONFIG_FIELD_RECIPIENT)
+
+        self.input_mailbox = self.cfg.get(
+            MailSpreader.CONFIG_SECTION_INPUT_SERVER,
+            MailSpreader.CONFIG_FIELD_MAILBOX, fallback=None)
+
+        self.store_mailbox = self.cfg.get(
+            MailSpreader.CONFIG_SECTION_STORE_SERVER,
+            MailSpreader.CONFIG_FIELD_MAILBOX, fallback=None)
 
     def setup_logging(self):
         loglevel = self.args.loglevel
@@ -126,20 +166,19 @@ class MailSpreader(object):
         self.setup_logging()
         logging.info("Mailspreader starts")
 
+        logging.debug("Used search filter: %s" % self.search_filter)
+
         self.input_server = MailSpreader.login_imap(
             self.cfg, MailSpreader.CONFIG_SECTION_INPUT_SERVER)
         logging.debug("logged-in: input server")
 
-        input_mailbox = self.cfg.get(MailSpreader.CONFIG_SECTION_INPUT_SERVER,
-                                     MailSpreader.CONFIG_FIELD_MAILBOX,
-                                     fallback=None)
-        if input_mailbox is None:
+        if self.input_mailbox is None:
             print(self.input_server.select())
             logging.debug("selected default mailbox")
         else:
-            self.input_server.select(input_mailbox)
+            self.input_server.select(self.input_mailbox)
             logging.debug(
-                "selected mailbox: %s" % input_mailbox)
+                "selected mailbox: %s" % self.input_mailbox)
 
         self.store_server = MailSpreader.login_imap(
             self.cfg, MailSpreader.CONFIG_SECTION_STORE_SERVER)
@@ -150,60 +189,40 @@ class MailSpreader(object):
         logging.debug("logged-in: send server")
         logging.debug("Preparation finished")
 
+    def process_one_msg(self, msg_id):
+        typ, data = self.input_server.fetch(msg_id, '(RFC822)')
+        msg = email.message_from_string(data[0][1].decode())
+        MailSpreader.remove_headers(msg)
+        msg['To'] = self.recipient
+
+        if self.custom_header != '':
+            msg[self.custom_header] = self.custom_header_value
+
+        self.send_server.sendmail(self.recipient,
+                                  self.recipient, str(msg))
+
+        self.store_server.append(self.store_mailbox, None, None,
+                                 str(msg).encode())
+
+        if self.mark_as_seen:
+            self.input_server.store(msg_id, '+FLAGS', '\\SEEN')
+
+        if self.delete_mail:
+            self.input_server.store(msg_id, '+FLAGS', '\\Deleted')
+
     def process_data(self):
 
         try:
+            typ, data = self.input_server.search(None, self.search_filter)
 
-            search_filter = self.cfg.get(
-                MailSpreader.CONFIG_SECTION_INPUT_SERVER,
-                MailSpreader.CONFIG_FIELD_SEARCH_FILTER,
-                fallback=MailSpreader.CONFIG_DEFAULT_SEARCH_FILTER)
+            for msg_id in data[0].split():
 
-            mark_as_seen = self.cfg.getboolean(
-                MailSpreader.CONFIG_SECTION_INPUT_SERVER,
-                MailSpreader.CONFIG_FIELD_MARK_AS_SEEN_AFTER_PROCESSING,
-                fallback=MailSpreader.CONFIG_DEFAULT_MARK_AS_SEEN_AFTER_PROCESSING)
+                try:
+                    self.process_one_msg(msg_id)
+                finally:
+                    pass
 
-            delete_mail = self.cfg.getboolean(
-                MailSpreader.CONFIG_SECTION_INPUT_SERVER,
-                MailSpreader.CONFIG_FIELD_DELETE_AFTER_PROCESSING,
-                fallback=MailSpreader.CONFIG_DEFAULT_DELETE_AFTER_PROCESSING)
-
-            logging.debug("Used search filter: %s" % search_filter)
-
-            typ, data = self.input_server.search(None, search_filter)
-
-            for num in data[0].split():
-                typ, data = self.input_server.fetch(num, '(RFC822)')
-                msg1 = email.message_from_string(data[0][1].decode())
-
-                print(msg1.keys())
-
-                for key in msg1.keys():
-                    print(key, key.lower())
-                    if key.lower() not in MailSpreader.HEADER_EXCLUDES:
-                        del msg1[key]
-                msg1['To'] = 'mail@sh-dev.de'
-
-                msg1['X-SHdever'] = 'mail@sh-dev.de'
-                print(msg1.keys())
-
-                self.send_server.sendmail("mail@sh-dev.de",
-                                          "mail@sh-dev.de", str(msg1))
-
-                self.store_server.append('"Sent\ Messages"',
-                                         None, None,
-                                         str(msg1).encode())
-
-                if mark_as_seen:
-                    self.input_server.store(num, '+FLAGS', '\\SEEN')
-
-                if delete_mail:
-                    self.input_server.store(num, '+FLAGS', '\\Deleted')
-
-                print('--------------------')
-
-            if delete_mail:
+            if self.delete_mail:
                 self.input_server.expunge()
         except:
             sys.stderr.write("Something went here extremly wrong, and I don't "
