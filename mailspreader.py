@@ -1,12 +1,14 @@
 #!/usr/bin/env pypy3
 
-import email
-import imaplib
-import smtplib
-import configparser
 import argparse
+import configparser
+import email
+import email.utils
+import imaplib
 import logging
+import smtplib
 import sys
+import traceback
 
 
 class MailSpreader(object):
@@ -22,6 +24,7 @@ class MailSpreader(object):
     CONFIG_DEFAULT_MARK_AS_SEEN_AFTER_PROCESSING = True
     CONFIG_DEFAULT_SEARCH_FILTER = 'NEW'
 
+    CONFIG_FIELD_ACCEPTED_MAIL_ADDRESSES = 'accepted_mail_addresses'
     CONFIG_FIELD_CUSTOM_HEADER = 'custom_header'
     CONFIG_FIELD_CUSTOM_HEADER_VALUE = 'custom_header_value'
     CONFIG_FIELD_DELETE_AFTER_PROCESSING = 'delete_after_processing'
@@ -39,7 +42,7 @@ class MailSpreader(object):
 
     HEADER_EXCLUDES = {'subject', 'from', 'date', 'content-type',
                        'mime-version', 'content-transfer-encoding',
-                       'message-id', 'x-mailer'}
+                       'x-mailer'}
 
     def __init__(self):
         super(MailSpreader, self).__init__()
@@ -86,6 +89,27 @@ class MailSpreader(object):
             if key.lower() not in MailSpreader.HEADER_EXCLUDES:
                 del headers[key]
 
+    @classmethod
+    def get_email_address(cls, raw_address):
+        if not raw_address is None:
+            match = email.utils.parseaddr(raw_address)
+            if match != ('', ''):
+                return match[1]
+            else:
+                return None
+        else:
+            return None
+
+    @classmethod
+    def get_domain_part(cls, address, is_raw=True):
+        if is_raw:
+            address = cls.get_email_address(address)
+
+        if not address is None:
+            return address.split('@')[-1]
+        else:
+            return None
+
     def main(self):
         self.preparations()
         self.process_data()
@@ -111,6 +135,8 @@ class MailSpreader(object):
     def process_config(self):
         self.cfg = configparser.ConfigParser(allow_no_value=True)
         self.cfg.read(self.args.configfile)
+
+        print(dict(self.cfg['MAIN']))
 
         self.search_filter = self.cfg.get(
             MailSpreader.CONFIG_SECTION_INPUT_SERVER,
@@ -147,6 +173,21 @@ class MailSpreader(object):
         self.store_mailbox = self.cfg.get(
             MailSpreader.CONFIG_SECTION_STORE_SERVER,
             MailSpreader.CONFIG_FIELD_MAILBOX, fallback=None)
+
+        self.process_config_accepted_mail_addresses()
+
+    def process_config_accepted_mail_addresses(self):
+        rawvalue = self.cfg.get(
+            MailSpreader.CONFIG_SECTION_MAIN,
+            MailSpreader.CONFIG_FIELD_ACCEPTED_MAIL_ADDRESSES,
+            fallback=None)
+
+        self.accepted_mail_addresses = []
+
+        if not rawvalue is None:
+            for match in email.utils.getaddresses([rawvalue]):
+                if match != ('', ''):
+                    self.accepted_mail_addresses.append(match[1])
 
     def setup_logging(self):
         loglevel = self.args.loglevel
@@ -191,8 +232,39 @@ class MailSpreader(object):
 
     def process_one_msg(self, msg_id):
         typ, data = self.input_server.fetch(msg_id, '(RFC822)')
+
+        logging.info('processing msg with id %s' % msg_id)
+
         msg = email.message_from_string(data[0][1].decode())
+
+        print(self.get_email_address(msg['Return-Path']))
+        print(self.accepted_mail_addresses)
+
+        if not self.get_email_address(msg['Return-Path']) \
+                in self.accepted_mail_addresses:
+            logging.info('msg %s rejected, return path not allowed' % msg_id)
+            return
+
+        if not self.get_email_address(msg['From']) \
+                in self.accepted_mail_addresses:
+            logging.info('msg %s rejected, from address not allowed' % msg_id)
+            return
+
+        if 'message-id' in msg:
+            old_msg_id = msg['message_id']
+        else:
+            old_msg_id = None
+
         MailSpreader.remove_headers(msg)
+
+        if not old_msg_id is None:
+            msg['References'] = old_msg_id
+
+        msg['Message-Id'] = email.utils.make_msgid(
+            domain=self.get_domain_part(msg['From']))
+
+        print(msg['Message-Id'])
+
         msg['To'] = self.recipient
 
         if self.custom_header != '':
@@ -201,8 +273,12 @@ class MailSpreader(object):
         self.send_server.sendmail(self.recipient,
                                   self.recipient, str(msg))
 
+        print(msg)
+        #try:
         self.store_server.append(self.store_mailbox, None, None,
                                  str(msg).encode())
+        # except:
+        #     logging.error('Error while appending a message')
 
         if self.mark_as_seen:
             self.input_server.store(msg_id, '+FLAGS', '\\SEEN')
@@ -214,21 +290,19 @@ class MailSpreader(object):
 
         try:
             typ, data = self.input_server.search(None, self.search_filter)
-
             for msg_id in data[0].split():
-
                 try:
                     self.process_one_msg(msg_id)
                 finally:
                     pass
-
             if self.delete_mail:
                 self.input_server.expunge()
         except:
             sys.stderr.write("Something went here extremly wrong, and I don't "
                              "know why\n")
-            self.logging.critical("Something went here extremly wrong, "
-                                  "and I don't know why")
+            logging.critical("Something went here extremly wrong, "
+                             "and I don't know why")
+            print(traceback.format_exc())
         finally:
 
             self.input_server.close()
