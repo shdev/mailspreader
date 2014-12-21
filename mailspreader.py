@@ -140,7 +140,8 @@ class MailSpreader(object):
 
     # preparation helper methods
 
-    def parse_arguments(self):
+    @classmethod
+    def parse_arguments(cls):
         ## prepare the commandline arguments
         parser = argparse.ArgumentParser(description='',
                                          epilog="I wish you a peaceful time.")
@@ -161,7 +162,7 @@ class MailSpreader(object):
                             action='store_true')
         parser.add_argument('configfile', help="the path to the config file")
 
-        self.args = parser.parse_args()
+        return parser.parse_args()
 
     def process_config(self):
         self.cfg = configparser.ConfigParser(allow_no_value=True)
@@ -238,7 +239,6 @@ class MailSpreader(object):
                             ': %(message)s')
 
     def preparations(self):
-        self.parse_arguments()
         self.process_config()
         self.setup_logging()
 
@@ -426,6 +426,7 @@ class MailSpreader(object):
             self.send_server.close()
 
     def run(self):
+        self.args = self.parse_arguments()
         self.preparations()
         logging.info("Mailspreader starts")
         self.process_data()
