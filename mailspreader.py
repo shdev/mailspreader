@@ -15,16 +15,28 @@ class MailSpreader(object):
     """The class is basic script for sending a mails to \
     multiply destinantions"""
 
+    # sections from the configuration file
+
     CONFIG_SECTION_INPUT_SERVER = "INPUT-SERVER"
     CONFIG_SECTION_MAIN = "MAIN"
     CONFIG_SECTION_SEND_SERVER = "SEND-SERVER"
     CONFIG_SECTION_STORE_SERVER = "STORE-SERVER"
 
+    # default values for some config fields
+
+    CONFIG_DEFAULT_ACCEPTED_MAIL_ADDRESSES = None
+    CONFIG_DEFAULT_CHECK_ON_RETURN_PATH = True
+    CONFIG_DEFAULT_CUSTOM_HEADER = ""
+    CONFIG_DEFAULT_CUSTOM_HEADER_VALUE = ""
     CONFIG_DEFAULT_DELETE_AFTER_PROCESSING = False
+    CONFIG_DEFAULT_MAILBOX = None
     CONFIG_DEFAULT_MARK_AS_SEEN_AFTER_PROCESSING = True
     CONFIG_DEFAULT_SEARCH_FILTER = 'NEW'
 
+    # fields from the config file
+
     CONFIG_FIELD_ACCEPTED_MAIL_ADDRESSES = 'accepted_mail_addresses'
+    CONFIG_FIELD_CHECK_ON_RETURN_PATH = 'check_on_return_path'
     CONFIG_FIELD_CUSTOM_HEADER = 'custom_header'
     CONFIG_FIELD_CUSTOM_HEADER_VALUE = 'custom_header_value'
     CONFIG_FIELD_DELETE_AFTER_PROCESSING = 'delete_after_processing'
@@ -40,15 +52,27 @@ class MailSpreader(object):
     CONFIG_FIELD_USE_SSL = 'use_ssl'
     CONFIG_FIELD_USERNAME = 'username'
 
-    HEADER_EXCLUDES = {'subject', 'from', 'date', 'content-type',
-                       'mime-version', 'content-transfer-encoding',
-                       'x-mailer'}
+    # a whitelist of headers which will not removed before resend
+
+    HEADER_WHITELIST = {
+        'subject',
+        'from',
+        'date',
+        'content-type',
+        'mime-version',
+        'content-transfer-encoding',
+        'x-mailer',
+    }
+
+    # here are the methods
 
     def __init__(self):
         super(MailSpreader, self).__init__()
 
+    # class methode with general methods
+
     @classmethod
-    def login_imap(cls, config, section):
+    def login_imap(cls, config, section, list_mailboxes):
         if config.getboolean(section, MailSpreader.CONFIG_FIELD_USE_SSL):
             imap_server = imaplib.IMAP4_SSL(
                 host=config.get(section, MailSpreader.CONFIG_FIELD_HOST),
@@ -63,6 +87,10 @@ class MailSpreader(object):
                           config.get(section,
                                      MailSpreader.CONFIG_FIELD_PASSWORD))
 
+        if list_mailboxes:
+            print('Mailboxes for %(username)s@%(host)s:' % config[section])
+            for mailbox in imap_server.list()[1]:
+                print(mailbox.decode())
         return imap_server
 
     @classmethod
@@ -86,7 +114,7 @@ class MailSpreader(object):
     @classmethod
     def remove_headers(cls, headers):
         for key in headers.keys():
-            if key.lower() not in MailSpreader.HEADER_EXCLUDES:
+            if key.lower() not in MailSpreader.HEADER_WHITELIST:
                 del headers[key]
 
     @classmethod
@@ -110,9 +138,7 @@ class MailSpreader(object):
         else:
             return None
 
-    def main(self):
-        self.preparations()
-        self.process_data()
+    # preparation helper methods
 
     def parse_arguments(self):
         ## prepare the commandline arguments
@@ -127,7 +153,12 @@ class MailSpreader(object):
                                      "DEBUG"],
                             default="ERROR",
                             help="choose your log level")
-
+        parser.add_argument('-l', '--list-mailboxes', dest='list_mailboxes',
+                            action='store_true')
+        parser.add_argument('-d', '--dry', dest="dry_run",
+                            action='store_true')
+        parser.add_argument('-t', '--trace-on-error', dest='trace_exception',
+                            action='store_true')
         parser.add_argument('configfile', help="the path to the config file")
 
         self.args = parser.parse_args()
@@ -135,8 +166,6 @@ class MailSpreader(object):
     def process_config(self):
         self.cfg = configparser.ConfigParser(allow_no_value=True)
         self.cfg.read(self.args.configfile)
-
-        print(dict(self.cfg['MAIN']))
 
         self.search_filter = self.cfg.get(
             MailSpreader.CONFIG_SECTION_INPUT_SERVER,
@@ -156,23 +185,30 @@ class MailSpreader(object):
         self.custom_header = self.cfg.get(
             MailSpreader.CONFIG_SECTION_SEND_SERVER,
             MailSpreader.CONFIG_FIELD_CUSTOM_HEADER,
-            fallback="")
+            fallback=MailSpreader.CONFIG_DEFAULT_CUSTOM_HEADER)
 
         self.custom_header_value = self.cfg.get(
             MailSpreader.CONFIG_SECTION_SEND_SERVER,
             MailSpreader.CONFIG_FIELD_CUSTOM_HEADER_VALUE,
-            fallback="")
+            fallback=MailSpreader.CONFIG_DEFAULT_CUSTOM_HEADER_VALUE)
 
         self.recipient = self.cfg.get(MailSpreader.CONFIG_SECTION_SEND_SERVER,
                                       MailSpreader.CONFIG_FIELD_RECIPIENT)
 
         self.input_mailbox = self.cfg.get(
             MailSpreader.CONFIG_SECTION_INPUT_SERVER,
-            MailSpreader.CONFIG_FIELD_MAILBOX, fallback=None)
+            MailSpreader.CONFIG_FIELD_MAILBOX,
+            fallback=MailSpreader.CONFIG_DEFAULT_MAILBOX)
 
         self.store_mailbox = self.cfg.get(
             MailSpreader.CONFIG_SECTION_STORE_SERVER,
-            MailSpreader.CONFIG_FIELD_MAILBOX, fallback=None)
+            MailSpreader.CONFIG_FIELD_MAILBOX,
+            fallback=MailSpreader.CONFIG_DEFAULT_MAILBOX)
+
+        self.check_on_return_path = self.cfg.get(
+            MailSpreader.CONFIG_SECTION_MAIN,
+            MailSpreader.CONFIG_FIELD_CHECK_ON_RETURN_PATH,
+            fallback=MailSpreader.CONFIG_DEFAULT_CHECK_ON_RETURN_PATH)
 
         self.process_config_accepted_mail_addresses()
 
@@ -180,7 +216,7 @@ class MailSpreader(object):
         rawvalue = self.cfg.get(
             MailSpreader.CONFIG_SECTION_MAIN,
             MailSpreader.CONFIG_FIELD_ACCEPTED_MAIL_ADDRESSES,
-            fallback=None)
+            fallback=MailSpreader.CONFIG_DEFAULT_ACCEPTED_MAIL_ADDRESSES)
 
         self.accepted_mail_addresses = []
 
@@ -205,16 +241,16 @@ class MailSpreader(object):
         self.parse_arguments()
         self.process_config()
         self.setup_logging()
-        logging.info("Mailspreader starts")
 
         logging.debug("Used search filter: %s" % self.search_filter)
 
         self.input_server = MailSpreader.login_imap(
-            self.cfg, MailSpreader.CONFIG_SECTION_INPUT_SERVER)
+            self.cfg, MailSpreader.CONFIG_SECTION_INPUT_SERVER,
+            self.args.list_mailboxes)
         logging.debug("logged-in: input server")
 
         if self.input_mailbox is None:
-            print(self.input_server.select())
+            self.input_server.select()
             logging.debug("selected default mailbox")
         else:
             self.input_server.select(self.input_mailbox)
@@ -222,7 +258,8 @@ class MailSpreader(object):
                 "selected mailbox: %s" % self.input_mailbox)
 
         self.store_server = MailSpreader.login_imap(
-            self.cfg, MailSpreader.CONFIG_SECTION_STORE_SERVER)
+            self.cfg, MailSpreader.CONFIG_SECTION_STORE_SERVER,
+            self.args.list_mailboxes)
         logging.debug("logged-in: store server")
 
         self.send_server = MailSpreader.login_smtp(
@@ -230,30 +267,77 @@ class MailSpreader(object):
         logging.debug("logged-in: send server")
         logging.debug("Preparation finished")
 
-    def process_one_msg(self, msg_id):
-        typ, data = self.input_server.fetch(msg_id, '(RFC822)')
+    # processing methods
 
-        logging.info('processing msg with id %s' % msg_id)
+    def filter_msg(self, msg):
+        """
+        Returns
+            * True if the message is allowed to be processed
+            * False if message should be untouched.
+        """
 
-        msg = email.message_from_string(data[0][1].decode())
+        if 'message-id' in msg:
+            msg_id = msg['message_id']
+        else:
+            msg_id = None
 
-        print(self.get_email_address(msg['Return-Path']))
-        print(self.accepted_mail_addresses)
+        if self.accepted_mail_addresses == []:
+            return True
 
-        if not self.get_email_address(msg['Return-Path']) \
+        if self.check_on_return_path and \
+                not self.get_email_address(msg['Return-Path']) \
                 in self.accepted_mail_addresses:
             logging.info('msg %s rejected, return path not allowed' % msg_id)
-            return
+            return False
 
         if not self.get_email_address(msg['From']) \
                 in self.accepted_mail_addresses:
             logging.info('msg %s rejected, from address not allowed' % msg_id)
-            return
+            return False
+
+        return True
+
+    def process_one_msg(self, msg_id):
+        typ, data = self.input_server.fetch(msg_id, '(RFC822)')
+
+        msg = email.message_from_string(data[0][1].decode())
+
+        if self.args.dry_run:
+            msg_org = email.message_from_string(data[0][1].decode())
 
         if 'message-id' in msg:
             old_msg_id = msg['message_id']
         else:
             old_msg_id = None
+
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            if 'subject' in msg:
+                _subject = msg['subject']
+            else:
+                _subject = None
+
+            if 'from' in msg:
+                _from = msg['from']
+            else:
+                _from = None
+
+            if 'to' in msg:
+                _to = msg['to']
+            else:
+                _to = None
+
+            logging.debug('processing msg[%s] %s; FROM: %s; TO: %s'
+                          % (old_msg_id, _subject, _from, _to))
+        else:
+            logging.info('processing msg with id %s' % msg_id)
+
+        if not self.filter_msg(msg):
+            if self.args.dry_run:
+                print('DRY-RUN: Rejected message '
+                      "[id: %(message-id)s   subject: %(subject)s  "
+                      "form: %(from)s  to:%(to)s  "
+                      "reply-to: %(reply-to)s]" % msg)
+            return
 
         MailSpreader.remove_headers(msg)
 
@@ -263,46 +347,77 @@ class MailSpreader(object):
         msg['Message-Id'] = email.utils.make_msgid(
             domain=self.get_domain_part(msg['From']))
 
-        print(msg['Message-Id'])
-
         msg['To'] = self.recipient
 
         if self.custom_header != '':
             msg[self.custom_header] = self.custom_header_value
 
-        self.send_server.sendmail(self.recipient,
-                                  self.recipient, str(msg))
+        if self.args.dry_run:
+            print('DRY-RUN: Send message '
+                  "[id: %(message-id)s   subject: %(subject)s  "
+                  "form: %(from)s  to:%(to)s  "
+                  "reply-to: %(reply-to)s]" % msg_org)
+        else:
+            self.send_server.sendmail(self.recipient,
+                                      self.recipient, str(msg))
 
-        print(msg)
-        #try:
-        self.store_server.append(self.store_mailbox, None, None,
-                                 str(msg).encode())
-        # except:
-        #     logging.error('Error while appending a message')
+        # print(msg)
+        try:
+            if self.args.dry_run:
+                print("DRY-RUN: Append to store server, message "
+                      "[id: %(message-id)s   subject: %(subject)s  "
+                      "form: %(from)s  to:%(to)s  "
+                      "reply-to: %(reply-to)s]" % msg)
+            else:
+                self.store_server.append(self.store_mailbox, '(\\SEEN)',
+                                         None, str(msg).encode())
+        except:
+            logging.error('Error while appending the message')
+            if self.args.trace_exception:
+                print(traceback.format_exc())
 
         if self.mark_as_seen:
-            self.input_server.store(msg_id, '+FLAGS', '\\SEEN')
+            if self.args.dry_run:
+                print('DRY-RUN: Mark as seen message '
+                      "[id: %(message-id)s   subject: %(subject)s  "
+                      "form: %(from)s  to:%(to)s  "
+                      "reply-to: %(reply-to)s]" % msg_org)
+            else:
+                self.input_server.store(msg_id, '+FLAGS', '\\SEEN')
 
         if self.delete_mail:
-            self.input_server.store(msg_id, '+FLAGS', '\\Deleted')
+            if self.args.dry_run:
+                print('DRY-RUN: Mark as deleted message '
+                      "[id: %(message-id)s   subject: %(subject)s  "
+                      "form: %(from)s  to:%(to)s  "
+                      "reply-to: %(reply-to)s]" % msg_org)
+            else:
+                self.input_server.store(msg_id, '+FLAGS', '\\Deleted')
 
     def process_data(self):
-
         try:
             typ, data = self.input_server.search(None, self.search_filter)
             for msg_id in data[0].split():
                 try:
                     self.process_one_msg(msg_id)
-                finally:
-                    pass
+                except:
+                    logging.error('An error occured while processing msg %s'
+                                  % msg_id)
+                    if self.args.trace_exception:
+                        print(traceback.format_exc())
+
             if self.delete_mail:
-                self.input_server.expunge()
+                if self.args.dry_run:
+                    print('DRY-RUN: expunge mailbox')
+                else:
+                    self.input_server.expunge()
         except:
             sys.stderr.write("Something went here extremly wrong, and I don't "
                              "know why\n")
             logging.critical("Something went here extremly wrong, "
                              "and I don't know why")
-            print(traceback.format_exc())
+            if self.args.trace_exception:
+                print(traceback.format_exc())
         finally:
 
             self.input_server.close()
@@ -310,6 +425,12 @@ class MailSpreader(object):
             self.store_server.logout()
             self.send_server.close()
 
+    def run(self):
+        self.preparations()
+        logging.info("Mailspreader starts")
+        self.process_data()
+        logging.info("Mailspreader is done")
+
 if __name__ == '__main__':
     spreader = MailSpreader()
-    spreader.main()
+    spreader.run()
