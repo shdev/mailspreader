@@ -3,3 +3,4 @@ logfile
 spreadlog
 scratch*
 *.pyc
+list_recipient.txt

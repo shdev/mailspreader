@@ -6,6 +6,7 @@ import email
 import email.utils
 import imaplib
 import logging
+import os.path
 import smtplib
 import sys
 import traceback
@@ -31,6 +32,7 @@ class MailSpreader(object):
     CONFIG_DEFAULT_DELETE_AFTER_PROCESSING = False
     CONFIG_DEFAULT_MAILBOX = None
     CONFIG_DEFAULT_MARK_AS_SEEN_AFTER_PROCESSING = True
+    CONFIG_DEFAULT_REPLY_TO = None
     CONFIG_DEFAULT_SEARCH_FILTER = 'NEW'
 
     # fields from the config file
@@ -48,6 +50,7 @@ class MailSpreader(object):
     CONFIG_FIELD_PASSWORD = 'password'
     CONFIG_FIELD_PORT = 'port'
     CONFIG_FIELD_RECIPIENT = 'recipient'
+    CONFIG_FIELD_REPLAY_TO = 'replay_to'
     CONFIG_FIELD_SEARCH_FILTER = 'search_filter'
     CONFIG_FIELD_USE_SSL = 'use_ssl'
     CONFIG_FIELD_USERNAME = 'username'
@@ -193,9 +196,6 @@ class MailSpreader(object):
             MailSpreader.CONFIG_FIELD_CUSTOM_HEADER_VALUE,
             fallback=MailSpreader.CONFIG_DEFAULT_CUSTOM_HEADER_VALUE)
 
-        self.recipient = self.cfg.get(MailSpreader.CONFIG_SECTION_SEND_SERVER,
-                                      MailSpreader.CONFIG_FIELD_RECIPIENT)
-
         self.input_mailbox = self.cfg.get(
             MailSpreader.CONFIG_SECTION_INPUT_SERVER,
             MailSpreader.CONFIG_FIELD_MAILBOX,
@@ -206,12 +206,18 @@ class MailSpreader(object):
             MailSpreader.CONFIG_FIELD_MAILBOX,
             fallback=MailSpreader.CONFIG_DEFAULT_MAILBOX)
 
+        self.reply_to = self.cfg.get(
+            MailSpreader.CONFIG_SECTION_MAIN,
+            MailSpreader.CONFIG_FIELD_REPLAY_TO,
+            fallback=MailSpreader.CONFIG_DEFAULT_REPLY_TO)
+
         self.check_on_return_path = self.cfg.get(
             MailSpreader.CONFIG_SECTION_MAIN,
             MailSpreader.CONFIG_FIELD_CHECK_ON_RETURN_PATH,
             fallback=MailSpreader.CONFIG_DEFAULT_CHECK_ON_RETURN_PATH)
 
         self.process_config_accepted_mail_addresses()
+        self.load_recipient_list()
 
     def process_config_accepted_mail_addresses(self):
         rawvalue = self.cfg.get(
@@ -238,7 +244,22 @@ class MailSpreader(object):
                             format='%(asctime)s [%(levelname)s]'
                             ': %(message)s')
 
+    def load_recipient_list(self):
+        raw_recipient = self.cfg.get(MailSpreader.CONFIG_SECTION_MAIN,
+                                     MailSpreader.CONFIG_FIELD_RECIPIENT)
+        if os.path.isfile(raw_recipient):
+            with open(raw_recipient, 'r') as f:
+                raw_recipient = f.read()
+            f.closed
+
+        matches = email.utils.getaddresses([raw_recipient])
+        self.recipient = [m for m in matches if m != ('', '')]
+
     def preparations(self):
+        """
+        Every thing from config parsing, setup logging and load the recipient
+        list is done here
+        """
         self.process_config()
         self.setup_logging()
 
@@ -297,6 +318,36 @@ class MailSpreader(object):
 
         return True
 
+    def send_and_store_msg(self, msg, recipient, msg_org):
+        del msg['Message-Id']
+        msg['Message-Id'] = email.utils.make_msgid(
+            domain=self.get_domain_part(msg['From']))
+
+        del msg['To']
+        msg['To'] = recipient
+
+        if self.args.dry_run:
+            print('DRY-RUN: Send message '
+                  "[id: %(message-id)s   subject: %(subject)s  "
+                  "form: %(from)s  to:%(to)s  "
+                  "reply-to: %(reply-to)s]" % msg_org)
+        else:
+            self.send_server.sendmail(recipient, recipient, str(msg))
+
+        try:
+            if self.args.dry_run:
+                print("DRY-RUN: Append to store server, message "
+                      "[id: %(message-id)s   subject: %(subject)s  "
+                      "form: %(from)s  to:%(to)s  "
+                      "reply-to: %(reply-to)s]" % msg)
+            else:
+                self.store_server.append(self.store_mailbox, '(\\SEEN)',
+                                         None, str(msg).encode())
+        except:
+            logging.error('Error while appending the message')
+            if self.args.trace_exception:
+                print(traceback.format_exc())
+
     def process_one_msg(self, msg_id):
         typ, data = self.input_server.fetch(msg_id, '(RFC822)')
 
@@ -304,6 +355,8 @@ class MailSpreader(object):
 
         if self.args.dry_run:
             msg_org = email.message_from_string(data[0][1].decode())
+        else:
+            msg_org = None
 
         if 'message-id' in msg:
             old_msg_id = msg['message_id']
@@ -340,41 +393,17 @@ class MailSpreader(object):
             return
 
         MailSpreader.remove_headers(msg)
+        msg['reply-to'] = self.reply_to
 
         if not old_msg_id is None:
             msg['References'] = old_msg_id
 
-        msg['Message-Id'] = email.utils.make_msgid(
-            domain=self.get_domain_part(msg['From']))
-
-        msg['To'] = self.recipient
-
         if self.custom_header != '':
             msg[self.custom_header] = self.custom_header_value
 
-        if self.args.dry_run:
-            print('DRY-RUN: Send message '
-                  "[id: %(message-id)s   subject: %(subject)s  "
-                  "form: %(from)s  to:%(to)s  "
-                  "reply-to: %(reply-to)s]" % msg_org)
-        else:
-            self.send_server.sendmail(self.recipient,
-                                      self.recipient, str(msg))
-
-        # print(msg)
-        try:
-            if self.args.dry_run:
-                print("DRY-RUN: Append to store server, message "
-                      "[id: %(message-id)s   subject: %(subject)s  "
-                      "form: %(from)s  to:%(to)s  "
-                      "reply-to: %(reply-to)s]" % msg)
-            else:
-                self.store_server.append(self.store_mailbox, '(\\SEEN)',
-                                         None, str(msg).encode())
-        except:
-            logging.error('Error while appending the message')
-            if self.args.trace_exception:
-                print(traceback.format_exc())
+        for recipient in self.recipient:
+            self.send_and_store_msg(msg, email.utils.formataddr(recipient),
+                                    msg_org)
 
         if self.mark_as_seen:
             if self.args.dry_run:
