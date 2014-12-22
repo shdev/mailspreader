@@ -13,8 +13,14 @@ import traceback
 
 
 class MailSpreader(object):
-    """The class is basic script for sending a mails to \
-    multiply destinantions"""
+    """
+    The class has the basic functionality for sending mails to
+    multiply destinantions. And store the sended mail into a mailbox.
+
+    start this script with '-h' as argument. You see some option to use.
+    in the git repository https://github.com/shdev/mailspreader you find a
+    default config file.
+    """
 
     # sections from the configuration file
 
@@ -163,9 +169,16 @@ class MailSpreader(object):
                             action='store_true')
         parser.add_argument('-t', '--trace-on-error', dest='trace_exception',
                             action='store_true')
+
+        parser.add_argument('-c', '--print-default-config',
+                            dest='print_config',
+                            action='store_true')
+
         parser.add_argument('configfile', help="the path to the config file")
 
-        return parser.parse_args()
+        args = parser.parse_args()
+
+        return args
 
     def process_config(self):
         self.cfg = configparser.ConfigParser(allow_no_value=True)
